@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { InjectEntityManager } from '@nestjs/typeorm';
 import { InjectModel } from '@nestjs/mongoose';
@@ -11,11 +12,22 @@ import { nextSnowflakeId } from '../common/snowflake-id';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
 import { QueryDocumentDto } from './dto/query-document.dto';
-import { DocumentEntity, DocumentStatus } from './entities/document.entity';
+import { UploadParseDto } from './dto/upload-parse.dto';
+import {
+  DocumentEntity,
+  DocumentStatus,
+} from './entities/document.entity';
 import {
   DocumentContent,
   DocumentContentDocument,
 } from './schemas/document-content.schema';
+import { RustfsService } from '../storage/rustfs.service';
+import { FileParserService } from './parser/file-parser.service';
+import {
+  decodeUploadFilename,
+  getExtension,
+  titleFromFilename,
+} from './parser/utils/markdown.util';
 
 /**
  * 文档服务
@@ -25,6 +37,8 @@ import {
  */
 @Injectable()
 export class DocumentService {
+  private readonly logger = new Logger(DocumentService.name);
+
   constructor(
     /** Postgres 实体管理器 */
     @InjectEntityManager()
@@ -32,6 +46,8 @@ export class DocumentService {
     /** Mongo 正文模型 */
     @InjectModel(DocumentContent.name)
     private readonly contentModel: Model<DocumentContentDocument>,
+    private readonly fileParserService: FileParserService,
+    private readonly rustfs: RustfsService,
   ) {}
 
   /**
@@ -44,7 +60,8 @@ export class DocumentService {
     const wordCount = this.countWords(dto.content);
     const status = dto.status ?? DocumentStatus.Draft;
     // 未传 summary 时，从正文截取预览作为 contentSummary
-    const contentSummary = dto.summary ?? this.buildContentSummary(dto.content);
+    const contentSummary =
+      dto.summary ?? this.buildContentSummary(dto.content);
 
     // 先写 Mongo，_id 由驱动自动生成 ObjectId
     const contentDoc = await this.contentModel.create({
@@ -261,6 +278,93 @@ export class DocumentService {
       { $set: { deleted: true } },
     );
     return { id, deleted: true };
+  }
+
+  /** 上传并解析文件 → 创建草稿文档 */
+  async uploadAndCreateDocument(
+    file: Express.Multer.File,
+    meta: UploadParseDto = {},
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('文件不能为空');
+    }
+
+    const originalFilename = decodeUploadFilename(file.originalname);
+    const extension = getExtension(originalFilename);
+
+    if (!this.fileParserService.isSupported(extension)) {
+      throw new BadRequestException(
+        `不支持的文件格式: ${extension}，支持的格式: ${this.fileParserService.supportedList()}`,
+      );
+    }
+
+    this.logger.log(
+      `上传并解析文件：name=${originalFilename}, size=${file.size}, ext=${extension}`,
+    );
+
+    let parsedContent: string;
+    try {
+      parsedContent = await this.fileParserService.parse({
+        originalname: originalFilename,
+        buffer: file.buffer,
+        size: file.size,
+      });
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`文件解析失败：name=${originalFilename}, error=${message}`);
+      throw new BadRequestException(`文件解析失败: ${message}`);
+    }
+
+    let fileUrl: string | null = null;
+    if (this.rustfs.isEnabled()) {
+      try {
+        fileUrl = await this.rustfs.uploadBytes(file.buffer, {
+          fileName: originalFilename,
+          contentType: file.mimetype || 'application/octet-stream',
+          prefix: 'documents',
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`原文件上传 RustFS 失败：${message}`);
+        throw new BadRequestException(`原文件上传失败: ${message}`);
+      }
+    } else {
+      this.logger.warn('RustFS 未启用，跳过原文件上传');
+    }
+
+    const title = titleFromFilename(originalFilename);
+
+    const created = await this.create({
+      title,
+      content: parsedContent,
+      categoryId: meta.categoryId,
+      teamId: meta.teamId,
+      authorId: meta.authorId,
+      tags: meta.tags,
+      remark: meta.remark,
+      createBy: meta.createBy,
+      isPublic: meta.isPublic,
+      status: DocumentStatus.Draft,
+    });
+
+    const previewLen = Math.min(200, parsedContent.length);
+    const result = {
+      documentId: created.id,
+      title,
+      fileUrl,
+      fileSize: file.size,
+      fileExtension: extension,
+      contentLength: parsedContent.length,
+      contentPreview: parsedContent.slice(0, previewLen),
+      status: DocumentStatus.Draft,
+    };
+
+    this.logger.log(
+      `文件解析并创建文档成功：documentId=${created.id}, title=${title}, ext=${extension}, chars=${parsedContent.length}, fileUrl=${fileUrl}`,
+    );
+
+    return result;
   }
 
   /**

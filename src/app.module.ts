@@ -6,10 +6,12 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DocumentModule } from './document/document.module';
 import { DocumentEntity } from './document/entities/document.entity';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    StorageModule,
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

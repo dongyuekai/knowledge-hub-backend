@@ -6,6 +6,7 @@ import {
   DocumentContent,
   DocumentContentSchema,
 } from './schemas/document-content.schema';
+import { FileParserService } from './parser/file-parser.service';
 
 @Module({
   imports: [
@@ -14,7 +15,7 @@ import {
     ]),
   ],
   controllers: [DocumentController],
-  providers: [DocumentService],
-  exports: [DocumentService],
+  providers: [DocumentService, FileParserService],
+  exports: [DocumentService, FileParserService],
 })
 export class DocumentModule {}
