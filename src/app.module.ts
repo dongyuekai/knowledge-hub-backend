@@ -1,16 +1,24 @@
+import { config as loadDotenv } from 'dotenv';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+
+// Cursor / shell 里若已有 OPENAI_API_KEY，dotenv 默认不会覆盖，会导致读到错误的短 Key。
+loadDotenv({ path: '.env', override: true });
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MongooseModule } from '@nestjs/mongoose';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DocumentModule } from './document/document.module';
 import { DocumentEntity } from './document/entities/document.entity';
+import { MqModule } from './mq/mq.module';
+import { PipelineModule } from './pipeline/pipeline.module';
 import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    PipelineModule,
+    MqModule,
     StorageModule,
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],

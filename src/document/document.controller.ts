@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Body,
   Patch,
   Param,
@@ -50,6 +51,12 @@ export class DocumentController {
   @Get()
   findAll(@Query() query: QueryDocumentDto) {
     return this.documentService.findAll(query);
+  }
+
+  /** 直接发布文档（无审核；发布后 MQ 异步触发 RAG / KG / ES） */
+  @Put(':id/publish')
+  publish(@Param('id') id: string) {
+    return this.documentService.publish(id);
   }
 
   /** 查询文档详情（含正文） */
