@@ -59,10 +59,10 @@ curl -s "$BASE/auth/me" \
 curl -s -X POST "$BASE/auth/register" \
   -H 'Content-Type: application/json' \
   -d '{
-    "username": "zhangsan",
+    "username": "dyk",
     "password": "123456",
-    "email": "zhangsan@company.com",
-    "realName": "张三"
+    "email": "457545648@qq.com",
+    "realName": "akai"
   }' | jq
 ```
 
