@@ -1,8 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConsumeMessage } from 'amqplib';
 import { PipelineOrchestrator } from '../pipeline/pipeline.orchestrator';
-import { RAG_REINDEX_QUEUE, SEARCH_INDEX_QUEUE } from './mq.constants';
 import {
+  KG_GRAPH_QUEUE,
+  RAG_REINDEX_QUEUE,
+  SEARCH_INDEX_QUEUE,
+} from './mq.constants';
+import {
+  KgBuildMessage,
   ReindexMessage,
   SearchIndexMessage,
 } from './messages/pipeline.messages';
@@ -11,7 +16,7 @@ import { RabbitMqService } from './rabbitmq.service';
 /**
  * 文档发布后管线的 MQ 消费者
  *
- * <p>消费：RAG 向量化 + Search 全文索引。</p>
+ * <p>消费：RAG 向量化 + Search 全文索引 + KG 建图。</p>
  * <p>注册时机：在构造函数里 `registerHandler`，</p>
  * 保证早于 {@link RabbitMqService.onModuleInit} 的 `bindConsumers`。
  */
@@ -29,6 +34,7 @@ export class DocumentPipelineConsumer {
     this.rabbit.registerHandler(SEARCH_INDEX_QUEUE, (msg) =>
       this.handleSearch(msg),
     );
+    this.rabbit.registerHandler(KG_GRAPH_QUEUE, (msg) => this.handleKg(msg));
   }
 
   /** RAG：分块 → 向量化 → ES kh_chunk（dense_vector） */
@@ -51,6 +57,15 @@ export class DocumentPipelineConsumer {
       body.documentId,
       body.document,
     );
+  }
+
+  /** KG：分块 → 抽实体关系 → Neo4j */
+  private async handleKg(msg: ConsumeMessage) {
+    const body = this.parseJson<KgBuildMessage>(msg);
+    this.logger.log(
+      `[KG] type=${body.type}, taskId=${body.taskId}, documentIds=${JSON.stringify(body.documentIds ?? [])}`,
+    );
+    await this.orchestrator.handleKgBuild(body.type, body.documentIds);
   }
 
   private parseJson<T>(msg: ConsumeMessage): T {

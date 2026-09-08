@@ -1,12 +1,12 @@
 /**
  * 管线共用类型定义
  *
- * 这些结构在 MQ 消息体、分块结果之间流转。
+ * 这些结构在 MQ 消息体、分块结果、图谱抽取结果之间流转。
  */
 
 /**
  * 一篇文档切出来的一块文本。
- * RAG：附 embedding 写入 ES `kh_chunk`（dense_vector）。
+ * RAG：附 embedding 写入 ES `kh_chunk`（dense_vector）；KG：作为抽实体的输入单元。
  */
 export interface DocumentChunk {
   /** 稳定 ID：sha256(documentId:index) 前 64 位，重建时可覆盖 */
@@ -30,8 +30,33 @@ export interface DocumentChunk {
   embedding?: number[];
 }
 
+/** 图谱实体（如「张三」「入职流程」「知识库」） */
+export interface ExtractedEntity {
+  name: string;
+  /** PERSON / ORGANIZATION / CONCEPT / DOCUMENT / PROCESS / PRODUCT 等，见 docs/kg-extraction-schema.md */
+  type: string;
+  description?: string;
+  aliases?: string[];
+}
+
+/** 实体间关系：source -[relation]-> target */
+export interface ExtractedRelation {
+  source: string;
+  target: string;
+  relation: string;
+  weight?: number;
+}
+
+/** 单个 chunk 的抽取结果 */
+export interface ExtractionResult {
+  chunkId?: string;
+  entities: ExtractedEntity[];
+  relations: ExtractedRelation[];
+}
+
 /**
  * 管线内部使用的「文档快照」：
+ * Postgres 元数据 + Mongo 正文拼在一起，避免各服务重复查库。
  */
 export interface PipelineDocument {
   id: string;
