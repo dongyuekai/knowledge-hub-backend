@@ -299,7 +299,7 @@ export class DocumentService {
 
     // MQ 失败不影响发布成功
     try {
-      await this.pipelinePublisher.afterPublish(saved);
+      await this.pipelinePublisher.afterPublish(saved, content);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(

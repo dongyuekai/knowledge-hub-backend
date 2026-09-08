@@ -91,7 +91,8 @@ export class PipelineOrchestrator {
         );
         return;
       }
-      await this.searchIndexService.indexDocument(document);
+      const snapshot = await this.ensureSearchContent(documentId, document);
+      await this.searchIndexService.indexDocument(snapshot);
       return;
     }
 
@@ -142,6 +143,34 @@ export class PipelineOrchestrator {
     }
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  /**
+   * Search 快照若没带正文（发布时漏传），回源 Mongo 补上，避免 kh_document.content 为空。
+   */
+  private async ensureSearchContent(
+    documentId: string,
+    document: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const existing = document.content;
+    if (typeof existing === 'string' && existing.trim()) {
+      return document;
+    }
+
+    const docs = await this.loadDocumentsByIds([documentId]);
+    const content = docs[0]?.content?.trim();
+    if (!content) {
+      this.logger.warn(`Search 回源正文仍为空：documentId=${documentId}`);
+      return document;
+    }
+
+    this.logger.warn(
+      `Search 快照缺少正文，已从 Mongo 回源：documentId=${documentId}, contentLen=${content.length}`,
+    );
+    return {
+      ...document,
+      content: content.length > 1000 ? content.substring(0, 1000) : content,
+    };
   }
 
   /** 按 ID 列表加载元数据 + Mongo 正文 */

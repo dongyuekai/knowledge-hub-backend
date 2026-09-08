@@ -78,7 +78,11 @@ export class SearchIndexService implements OnModuleInit, OnModuleDestroy {
       refresh: true,
     });
 
-    this.logger.log(`搜索索引已写入 ES：documentId=${id}`);
+    const contentLen =
+      typeof doc.content === 'string' ? doc.content.length : 0;
+    this.logger.log(
+      `搜索索引已写入 ES：documentId=${id}, contentLen=${contentLen}`,
+    );
   }
 
   /** 下架 / 删除时从 ES 移除 */
