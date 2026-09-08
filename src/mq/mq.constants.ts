@@ -1,15 +1,21 @@
 /**
  * RabbitMQ 拓扑常量
  *
- * 交换机：rag.reindex
+ * 交换机：rag.reindex / search.index
  * 队列名带 `kh.` 前缀，避免和本机同时跑的其他项目冲突。
  */
 
 /** RAG 重建索引交换机（topic） */
 export const RAG_REINDEX_EXCHANGE = 'rag.reindex.exchange';
+/** 文档级搜索索引交换机（topic） */
+export const SEARCH_INDEX_EXCHANGE = 'search.index.exchange';
 
 /** 本服务消费的队列 */
 export const RAG_REINDEX_QUEUE = 'kh.rag.reindex.queue';
+export const SEARCH_INDEX_QUEUE = 'kh.search.index.queue';
 
-/** 路由键：按文档 ID 重建 */
+/** 路由键：按文档 ID 重建 / 删除 */
 export const RAG_RK_BY_IDS = 'rag.reindex.by_ids';
+export const RAG_RK_DELETE = 'rag.reindex.delete';
+export const SEARCH_RK_INDEX = 'search.index.document';
+export const SEARCH_RK_DELETE = 'search.index.delete';

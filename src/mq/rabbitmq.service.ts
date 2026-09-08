@@ -14,6 +14,11 @@ import {
   RAG_REINDEX_EXCHANGE,
   RAG_REINDEX_QUEUE,
   RAG_RK_BY_IDS,
+  RAG_RK_DELETE,
+  SEARCH_INDEX_EXCHANGE,
+  SEARCH_INDEX_QUEUE,
+  SEARCH_RK_DELETE,
+  SEARCH_RK_INDEX,
 } from './mq.constants';
 
 export type MessageHandler = (msg: ConsumeMessage) => Promise<void> | void;
@@ -161,6 +166,20 @@ export class RabbitMqService implements OnModuleInit, OnModuleDestroy {
     await ch.assertExchange(RAG_REINDEX_EXCHANGE, 'topic', { durable: true });
     await ch.assertQueue(RAG_REINDEX_QUEUE, { durable: true });
     await ch.bindQueue(RAG_REINDEX_QUEUE, RAG_REINDEX_EXCHANGE, RAG_RK_BY_IDS);
+    await ch.bindQueue(RAG_REINDEX_QUEUE, RAG_REINDEX_EXCHANGE, RAG_RK_DELETE);
+
+    await ch.assertExchange(SEARCH_INDEX_EXCHANGE, 'topic', { durable: true });
+    await ch.assertQueue(SEARCH_INDEX_QUEUE, { durable: true });
+    await ch.bindQueue(
+      SEARCH_INDEX_QUEUE,
+      SEARCH_INDEX_EXCHANGE,
+      SEARCH_RK_INDEX,
+    );
+    await ch.bindQueue(
+      SEARCH_INDEX_QUEUE,
+      SEARCH_INDEX_EXCHANGE,
+      SEARCH_RK_DELETE,
+    );
 
     this.logger.log('RabbitMQ 拓扑已声明（RAG）');
   }
