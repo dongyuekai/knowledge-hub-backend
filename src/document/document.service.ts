@@ -20,6 +20,7 @@ import {
 } from './schemas/document-content.schema';
 import { RustfsService } from '../storage/rustfs.service';
 import { DocumentPipelinePublisher } from '../mq/document-pipeline.publisher';
+import 'multer';
 import { FileParserService } from './parser/file-parser.service';
 import {
   decodeUploadFilename,

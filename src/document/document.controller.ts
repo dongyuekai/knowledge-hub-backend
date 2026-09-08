@@ -13,6 +13,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import 'multer';
 import { DocumentService } from './document.service';
 import { CreateDocumentDto } from './dto/create-document.dto';
 import { UpdateDocumentDto } from './dto/update-document.dto';
