@@ -14,7 +14,9 @@ import { DocumentReviewEntity } from './document/entities/document-review.entity
 import { AuthModule } from './auth/auth.module';
 import { MqModule } from './mq/mq.module';
 import { PipelineModule } from './pipeline/pipeline.module';
+import { RedisModule } from './redis/redis.module';
 import { StorageModule } from './storage/storage.module';
+import { UserModule } from './user/user.module';
 import { UserEntity } from './user/entities/user.entity';
 import { RoleEntity } from './user/entities/role.entity';
 import { UserRoleEntity } from './user/entities/user-role.entity';
@@ -22,6 +24,7 @@ import { UserRoleEntity } from './user/entities/user-role.entity';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    RedisModule,
     PipelineModule,
     MqModule,
     StorageModule,
@@ -54,6 +57,7 @@ import { UserRoleEntity } from './user/entities/user-role.entity';
       }),
     }),
     DocumentModule,
+    UserModule,
     AuthModule,
   ],
   controllers: [AppController],
