@@ -3,7 +3,6 @@ import {
   UnauthorizedException,
   NotFoundException,
   BadRequestException,
-  Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -38,8 +37,6 @@ interface TokenPayload {
 
 @Injectable()
 export class AuthService {
-  private readonly logger = new Logger(AuthService.name);
-
   constructor(
     private readonly userService: UserService,
     private readonly jwtService: JwtService,
@@ -124,10 +121,8 @@ export class AuthService {
           dto.username,
           token,
         );
-      } catch (error) {
+      } catch {
         await this.emailActivation.deleteByToken(token);
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.error(`激活邮件发送失败：${message}`);
         throw new BadRequestException('激活邮件发送失败，请稍后再试');
       }
       return {
@@ -172,10 +167,8 @@ export class AuthService {
         user.username,
         code,
       );
-    } catch (error) {
+    } catch {
       await this.passwordReset.delete(dto.email);
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`重置码邮件发送失败：${message}`);
       throw new BadRequestException('邮件发送失败，请稍后再试');
     }
     return { message: '验证码已发送' };

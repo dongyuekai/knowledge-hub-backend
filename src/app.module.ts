@@ -20,6 +20,9 @@ import { UserModule } from './user/user.module';
 import { UserEntity } from './user/entities/user.entity';
 import { RoleEntity } from './user/entities/role.entity';
 import { UserRoleEntity } from './user/entities/user-role.entity';
+import { PermissionEntity } from './user/entities/permission.entity';
+import { RolePermissionEntity } from './user/entities/role-permission.entity';
+import { UserPermissionEntity } from './user/entities/user-permission.entity';
 
 @Module({
   imports: [
@@ -43,6 +46,9 @@ import { UserRoleEntity } from './user/entities/user-role.entity';
           UserEntity,
           RoleEntity,
           UserRoleEntity,
+          PermissionEntity,
+          RolePermissionEntity,
+          UserPermissionEntity,
         ],
         synchronize: false,
       }),

@@ -8,14 +8,20 @@ import {
   Put,
 } from '@nestjs/common';
 import { RoleService } from './role.service';
+import { PermissionService } from './permission.service';
 import { CreateRoleDto, UpdateRoleDto } from './dto/extra.dto';
+import { AssignPermissionIdsDto } from './dto/permission.dto';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { RequirePermission } from '../auth/decorators/require-permission.decorator';
 import { RoleCode } from '../common/constants/roles';
 
 @Controller('roles')
 @Roles(RoleCode.ADMIN)
 export class RoleController {
-  constructor(private readonly roleService: RoleService) {}
+  constructor(
+    private readonly roleService: RoleService,
+    private readonly permissionService: PermissionService,
+  ) {}
 
   @Get('list')
   async listRoles() {
@@ -67,5 +73,25 @@ export class RoleController {
   async deleteRole(@Param('id') id: string) {
     await this.roleService.delete(id);
     return { message: '删除成功' };
+  }
+
+  @Get(':id/permissions')
+  @RequirePermission('system:role')
+  async getRolePermissions(@Param('id') id: string) {
+    const permissionIds = await this.permissionService.getRolePermissionIds(id);
+    return { roleId: id, permissionIds };
+  }
+
+  @Put(':id/permissions')
+  @RequirePermission('system:role')
+  async assignRolePermissions(
+    @Param('id') id: string,
+    @Body() dto: AssignPermissionIdsDto,
+  ) {
+    const permissionIds = await this.permissionService.assignRolePermissions(
+      id,
+      dto,
+    );
+    return { roleId: id, permissionIds };
   }
 }
