@@ -6,8 +6,6 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectEntityManager } from '@nestjs/typeorm';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
 import { EntityManager, IsNull } from 'typeorm';
 import { nextSnowflakeId } from '../common/snowflake-id';
 import { DocumentPipelinePublisher } from '../mq/document-pipeline.publisher';
@@ -17,11 +15,8 @@ import {
   DocumentReviewEntity,
   ReviewResult,
 } from './entities/document-review.entity';
-import {
-  DocumentContent,
-  DocumentContentDocument,
-} from './schemas/document-content.schema';
 import { QueryReviewTasksDto } from './dto/review.dto';
+import { AuthUser } from '../auth/auth-user.interface';
 
 /**
  * 文档发布审核服务
@@ -36,8 +31,6 @@ export class DocumentReviewService {
   constructor(
     @InjectEntityManager()
     private readonly em: EntityManager,
-    @InjectModel(DocumentContent.name)
-    private readonly contentModel: Model<DocumentContentDocument>,
     private readonly pipelinePublisher: DocumentPipelinePublisher,
     private readonly config: ConfigService,
   ) {}
@@ -53,7 +46,10 @@ export class DocumentReviewService {
    * 提交审核：Draft / Published → PendingReview
    * 若来自 Published，先清索引（审核期间不可检索）
    */
-  async submitForReview(documentId: string): Promise<DocumentEntity> {
+  async submitForReview(
+    documentId: string,
+    actor?: AuthUser,
+  ): Promise<DocumentEntity> {
     const doc = await this.findDocumentOrThrow(documentId);
 
     if (!canSubmitReview(doc.status)) {
@@ -78,6 +74,7 @@ export class DocumentReviewService {
     await this.em.save(review);
 
     doc.status = DocumentStatus.PendingReview;
+    if (actor?.userId) doc.updateBy = actor.userId;
     const saved = await this.em.save(doc);
 
     if (beforeStatus === DocumentStatus.Published) {
@@ -93,15 +90,15 @@ export class DocumentReviewService {
   /** 审核通过 → Published + 重建索引 */
   async approveReview(
     reviewId: string,
-    reviewerId?: string,
-    reviewerName?: string,
+    reviewerId: string,
+    reviewerName: string,
     reviewComment?: string,
   ): Promise<DocumentEntity> {
     const review = await this.findPendingReviewOrThrow(reviewId);
 
     review.reviewResult = ReviewResult.Approved;
-    review.reviewerId = reviewerId ?? null;
-    review.reviewerName = reviewerName ?? '审核员';
+    review.reviewerId = reviewerId;
+    review.reviewerName = reviewerName;
     review.reviewComment = reviewComment ?? null;
     review.reviewedAt = new Date();
     await this.em.save(review);
@@ -110,9 +107,7 @@ export class DocumentReviewService {
     doc.status = DocumentStatus.Published;
     doc.publishTime = new Date();
     const saved = await this.em.save(doc);
-
-    const content = await this.loadContent(doc.contentId);
-    await this.safePublish(saved, content);
+    await this.safePublish(saved);
 
     this.logger.log(`审核通过：reviewId=${reviewId}, documentId=${doc.id}`);
     return saved;
@@ -122,8 +117,8 @@ export class DocumentReviewService {
   async rejectReview(
     reviewId: string,
     reviewComment: string,
-    reviewerId?: string,
-    reviewerName?: string,
+    reviewerId: string,
+    reviewerName: string,
   ): Promise<DocumentEntity> {
     if (!reviewComment?.trim()) {
       throw new BadRequestException('驳回意见不能为空');
@@ -132,8 +127,8 @@ export class DocumentReviewService {
     const review = await this.findPendingReviewOrThrow(reviewId);
 
     review.reviewResult = ReviewResult.Rejected;
-    review.reviewerId = reviewerId ?? null;
-    review.reviewerName = reviewerName ?? '审核员';
+    review.reviewerId = reviewerId;
+    review.reviewerName = reviewerName;
     review.reviewComment = reviewComment.trim();
     review.reviewedAt = new Date();
     await this.em.save(review);
@@ -217,16 +212,9 @@ export class DocumentReviewService {
     return doc;
   }
 
-  private async loadContent(contentId: string): Promise<string> {
-    const contentDoc = await this.contentModel
-      .findOne({ _id: contentId, deleted: false })
-      .lean();
-    return contentDoc?.content ?? '';
-  }
-
-  private async safePublish(doc: DocumentEntity, content: string) {
+  private async safePublish(doc: DocumentEntity) {
     try {
-      await this.pipelinePublisher.afterPublish(doc, content);
+      await this.pipelinePublisher.afterPublish(doc);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(

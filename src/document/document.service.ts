@@ -33,6 +33,7 @@ import {
   titleFromFilename,
 } from './parser/utils/markdown.util';
 import { DocumentReviewService } from './document-review.service';
+import { AuthUser } from '../auth/auth-user.interface';
 
 /**
  * 文档服务
@@ -63,7 +64,7 @@ export class DocumentService {
    * 流程：生成雪花 ID → 写 Mongo 正文（拿 ObjectId）→ 写 Postgres 元数据
    * 若 Postgres 写入失败，回滚删除已写入的 Mongo 正文，避免脏数据
    */
-  async create(dto: CreateDocumentDto) {
+  async create(dto: CreateDocumentDto, actor: AuthUser) {
     const requestedStatus = dto.status ?? DocumentStatus.Draft;
     // 创建时不允许直接设为 Archived / PendingReview
     if (
@@ -106,7 +107,7 @@ export class DocumentService {
         summary: dto.summary,
         categoryId: dto.categoryId,
         teamId: dto.teamId,
-        authorId: dto.authorId,
+        authorId: actor.userId,
         coverImage: dto.coverImage,
         tags: dto.tags,
         status,
@@ -115,8 +116,8 @@ export class DocumentService {
         wordCount,
         // 创建即发布时，记录发布时间
         publishTime: status === DocumentStatus.Published ? new Date() : null,
-        createBy: dto.createBy,
-        updateBy: dto.createBy,
+        createBy: actor.userId,
+        updateBy: actor.userId,
         deleted: false,
       });
 
@@ -125,7 +126,7 @@ export class DocumentService {
       // 仅 Published 才建索引。需审时创建即 Published 已在上方拒绝，
       // 能走到这里的 Published 一定是免审；草稿不投 MQ。
       if (status === DocumentStatus.Published) {
-        await this.safePublish(saved, dto.content);
+        await this.safePublish(saved);
       }
 
       return { ...saved, content: dto.content };
@@ -215,7 +216,7 @@ export class DocumentService {
    * - 仅改 summary：同步更新 Mongo contentSummary
    * - 其余字段只更新 Postgres 元数据
    */
-  async update(id: string, dto: UpdateDocumentDto) {
+  async update(id: string, dto: UpdateDocumentDto, actor: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -287,12 +288,11 @@ export class DocumentService {
     if (dto.summary !== undefined) doc.summary = dto.summary;
     if (dto.categoryId !== undefined) doc.categoryId = dto.categoryId;
     if (dto.teamId !== undefined) doc.teamId = dto.teamId;
-    if (dto.authorId !== undefined) doc.authorId = dto.authorId;
     if (dto.coverImage !== undefined) doc.coverImage = dto.coverImage;
     if (dto.tags !== undefined) doc.tags = dto.tags;
     if (dto.remark !== undefined) doc.remark = dto.remark;
     if (dto.isPublic !== undefined) doc.isPublic = dto.isPublic;
-    if (dto.updateBy !== undefined) doc.updateBy = dto.updateBy;
+    doc.updateBy = actor.userId;
 
     const saved = await this.em.save(doc);
     const finalContent = newContent ?? (await this.loadContent(doc.contentId));
@@ -303,7 +303,6 @@ export class DocumentService {
       oldStatus,
       saved.status,
       contentChanged,
-      finalContent,
     );
 
     return { ...saved, content: finalContent };
@@ -314,7 +313,7 @@ export class DocumentService {
    * - 需审核：Draft / Published → PendingReview（不索引）
    * - 免审：Draft / Published / Archived → Published + 索引
    */
-  async publish(id: string) {
+  async publish(id: string, actor: AuthUser) {
     this.logger.log(`发布文档：documentId=${id}`);
 
     const doc = await this.em.findOne(DocumentEntity, {
@@ -338,20 +337,20 @@ export class DocumentService {
         doc.status === DocumentStatus.Draft ||
         doc.status === DocumentStatus.Published
       ) {
-        const saved = await this.reviewService.submitForReview(id);
+        const saved = await this.reviewService.submitForReview(id, actor);
         const content = await this.loadContent(saved.contentId);
         return { ...saved, content };
       }
     }
 
-    return this.directPublish(id);
+    return this.directPublish(id, actor);
   }
 
   /**
    * 免审直接发布
    * 也供 DocumentReviewService.approveReview 间接使用（审核通过后 status→Published）
    */
-  async directPublish(id: string) {
+  async directPublish(id: string, actor?: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -370,16 +369,17 @@ export class DocumentService {
 
     doc.status = DocumentStatus.Published;
     doc.publishTime = new Date();
+    if (actor?.userId) doc.updateBy = actor.userId;
     const saved = await this.em.save(doc);
     const content = await this.loadContent(saved.contentId);
-    await this.safePublish(saved, content);
+    await this.safePublish(saved);
 
     this.logger.log(`文档发布成功：documentId=${id}`);
     return { ...saved, content };
   }
 
   /** 归档：Published → Archived，清索引 */
-  async archive(id: string) {
+  async archive(id: string, actor: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -391,6 +391,7 @@ export class DocumentService {
     }
 
     doc.status = DocumentStatus.Archived;
+    doc.updateBy = actor.userId;
     const saved = await this.em.save(doc);
     await this.safeUnpublish(id);
 
@@ -399,7 +400,7 @@ export class DocumentService {
   }
 
   /** 已发布 → 草稿（保存草稿），清索引 */
-  async saveAsDraft(id: string) {
+  async saveAsDraft(id: string, actor: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -411,6 +412,7 @@ export class DocumentService {
     }
 
     doc.status = DocumentStatus.Draft;
+    doc.updateBy = actor.userId;
     const saved = await this.em.save(doc);
     await this.safeUnpublish(id);
 
@@ -423,7 +425,7 @@ export class DocumentService {
    * Postgres、Mongo 两侧都将 deleted 置为 true（不物理删正文），
    * 已发布文档会异步清理 ES 搜索索引、向量块与 Neo4j 图谱。
    */
-  async remove(id: string) {
+  async remove(id: string, actor: AuthUser) {
     const doc = await this.em.findOne(DocumentEntity, {
       where: { id, deleted: false },
     });
@@ -437,6 +439,7 @@ export class DocumentService {
     }
 
     doc.deleted = true;
+    doc.updateBy = actor.userId;
     await this.em.save(doc);
     await this.contentModel.updateOne(
       { _id: doc.contentId },
@@ -450,6 +453,7 @@ export class DocumentService {
   async uploadAndCreateDocument(
     file: Express.Multer.File,
     meta: UploadParseDto = {},
+    actor: AuthUser,
   ) {
     if (!file?.buffer?.length) {
       throw new BadRequestException('文件不能为空');
@@ -503,18 +507,19 @@ export class DocumentService {
 
     const title = titleFromFilename(originalFilename);
 
-    const created = await this.create({
-      title,
-      content: parsedContent,
-      categoryId: meta.categoryId,
-      teamId: meta.teamId,
-      authorId: meta.authorId,
-      tags: meta.tags,
-      remark: meta.remark,
-      createBy: meta.createBy,
-      isPublic: meta.isPublic,
-      status: DocumentStatus.Draft,
-    });
+    const created = await this.create(
+      {
+        title,
+        content: parsedContent,
+        categoryId: meta.categoryId,
+        teamId: meta.teamId,
+        tags: meta.tags,
+        remark: meta.remark,
+        isPublic: meta.isPublic,
+        status: DocumentStatus.Draft,
+      },
+      actor,
+    );
 
     const previewLen = Math.min(200, parsedContent.length);
     const result = {
@@ -545,7 +550,6 @@ export class DocumentService {
     oldStatus: DocumentStatus,
     newStatus: DocumentStatus,
     contentChanged: boolean,
-    content: string,
   ) {
     const wasPublished = oldStatus === DocumentStatus.Published;
     const isPublished = newStatus === DocumentStatus.Published;
@@ -557,12 +561,12 @@ export class DocumentService {
 
     if (isPublished && contentChanged) {
       if (!this.reviewService.isRequireApproval()) {
-        await this.safePublish(doc, content);
+        await this.safePublish(doc);
       }
     }
   }
 
-  /** 从 Mongo 读取正文（publish / 审核通过后建索引用） */
+  /** 从 Mongo 读取正文（详情 / 发布响应） */
   private async loadContent(contentId: string): Promise<string> {
     const contentDoc = await this.contentModel
       .findOne({ _id: contentId, deleted: false })
@@ -571,9 +575,9 @@ export class DocumentService {
   }
 
   /** 投递 MQ：RAG 分块向量 + 全文搜索 + KG 建图（失败不回滚文档状态） */
-  private async safePublish(doc: DocumentEntity, content: string) {
+  private async safePublish(doc: DocumentEntity) {
     try {
-      await this.pipelinePublisher.afterPublish(doc, content);
+      await this.pipelinePublisher.afterPublish(doc);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(

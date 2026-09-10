@@ -235,6 +235,146 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 查询实体节点。Neo4j 不可用时返回 []。
+   */
+  async listNodes(type?: string, limit = 200) {
+    if (!this.driver) {
+      this.logger.warn('跳过图谱节点查询（Neo4j 不可用）');
+      return [];
+    }
+    const cap = Math.min(Math.max(limit, 1), 500);
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `
+        MATCH (e:KnowledgeEntity)
+        WHERE $type IS NULL OR $type = '' OR e.type = $type
+        RETURN e.name AS id, e.name AS name, e.type AS type,
+               e.description AS description
+        LIMIT $limit
+        `,
+        { type: type ?? null, limit: neo4j.int(cap) },
+      );
+      return result.records.map((record) => ({
+        id: record.get('id') as string,
+        name: record.get('name') as string,
+        type: (record.get('type') as string) ?? null,
+        description: (record.get('description') as string) ?? null,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`图谱节点查询失败：${message}`);
+      return [];
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * 查询实体间 RELATED_TO 边。Neo4j 不可用时返回 []。
+   */
+  async listEdges(limit = 500) {
+    if (!this.driver) {
+      this.logger.warn('跳过图谱边查询（Neo4j 不可用）');
+      return [];
+    }
+    const cap = Math.min(Math.max(limit, 1), 1000);
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `
+        MATCH (a:KnowledgeEntity)-[r:RELATED_TO]->(b:KnowledgeEntity)
+        RETURN a.name AS source, b.name AS target,
+               r.relation AS relation, r.weight AS weight
+        LIMIT $limit
+        `,
+        { limit: neo4j.int(cap) },
+      );
+      return result.records.map((record) => ({
+        source: record.get('source') as string,
+        target: record.get('target') as string,
+        relation: (record.get('relation') as string) ?? 'RELATED_TO',
+        weight: this.toNumber(record.get('weight'), 0.5),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`图谱边查询失败：${message}`);
+      return [];
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * 图谱关键词检索：匹配实体名/描述、文档标题/摘要、块标题/正文。
+   * Neo4j 不可用或关键词为空时返回 []。
+   */
+  async searchGraph(keyword: string, limit = 50) {
+    if (!this.driver) {
+      this.logger.warn('跳过图谱检索（Neo4j 不可用）');
+      return [];
+    }
+    const kw = keyword.trim();
+    if (!kw) return [];
+
+    const cap = Math.min(Math.max(limit, 1), 200);
+    const session = this.driver.session();
+    try {
+      const result = await session.run(
+        `
+        MATCH (n)
+        WHERE toLower(coalesce(n.name, '')) CONTAINS toLower($kw)
+           OR toLower(coalesce(n.title, '')) CONTAINS toLower($kw)
+           OR toLower(coalesce(n.heading, '')) CONTAINS toLower($kw)
+           OR toLower(coalesce(n.description, '')) CONTAINS toLower($kw)
+           OR toLower(coalesce(n.summary, '')) CONTAINS toLower($kw)
+           OR toLower(coalesce(n.content, '')) CONTAINS toLower($kw)
+        RETURN labels(n)[0] AS label,
+               coalesce(n.name, n.title, n.heading, n.id, n.chunkId) AS name,
+               coalesce(n.id, n.chunkId, n.name) AS id,
+               n.type AS type,
+               n.title AS title,
+               n.description AS description,
+               n.heading AS heading,
+               n.documentId AS documentId,
+               n.summary AS summary,
+               CASE
+                 WHEN n.content IS NULL THEN null
+                 ELSE substring(n.content, 0, 160)
+               END AS snippet
+        ORDER BY label, name
+        LIMIT $limit
+        `,
+        { kw, limit: neo4j.int(cap) },
+      );
+      return result.records.map((record) => ({
+        id: record.get('id') as string,
+        name: record.get('name') as string,
+        label: (record.get('label') as string) ?? null,
+        type: (record.get('type') as string) ?? null,
+        title: (record.get('title') as string) ?? null,
+        description: (record.get('description') as string) ?? null,
+        heading: (record.get('heading') as string) ?? null,
+        documentId: (record.get('documentId') as string) ?? null,
+        summary: (record.get('summary') as string) ?? null,
+        snippet: (record.get('snippet') as string) ?? null,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`图谱检索失败：${message}`);
+      return [];
+    } finally {
+      await session.close();
+    }
+  }
+
+  private toNumber(value: unknown, fallback: number): number {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (neo4j.isInt(value)) return value.toNumber();
+    return fallback;
+  }
+
+  /**
    * 把抽取结果写入 Neo4j：
    * - KnowledgeEntity（按 name MERGE，跨文档可复用同名实体）
    * - DocumentChunk -[:MENTIONS]-> Entity
