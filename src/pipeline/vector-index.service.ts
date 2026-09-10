@@ -6,7 +6,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DocumentChunk } from './types/pipeline.types';
+import { ChunkHit, DocumentChunk } from './types/pipeline.types';
 
 /** RAG 分块向量索引名 */
 const CHUNK_INDEX = 'kh_chunk';
@@ -127,7 +127,173 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 创建 kh_chunk 索引（含 dense_vector）。
+   * BM25 关键词检索（content + document_title，ik_smart）。
+   * ES 不可用时返回 []。
+   */
+  async keywordSearch(query: string, topK = 20): Promise<ChunkHit[]> {
+    if (!this.es) {
+      this.logger.warn('跳过关键词检索（ES 不可用）');
+      return [];
+    }
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+
+    const k = this.clampTopK(topK);
+    try {
+      const response = await this.es.search({
+        index: CHUNK_INDEX,
+        size: k,
+        query: {
+          multi_match: {
+            query: trimmed,
+            fields: ['document_title^2', 'content'],
+            analyzer: 'ik_smart',
+          },
+        },
+        _source: [
+          'chunk_id',
+          'document_id',
+          'document_title',
+          'content',
+          'heading',
+        ],
+      });
+      return this.mapHits(response.hits.hits);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`关键词检索失败：${message}`);
+      return [];
+    }
+  }
+
+  /**
+   * kNN 检索知识块（cosine）。
+   * ES 不可用或索引为空时返回 []。
+   */
+  async knnSearch(queryVector: number[], topK = 20): Promise<ChunkHit[]> {
+    if (!this.es) {
+      this.logger.warn('跳过向量检索（ES 不可用）');
+      return [];
+    }
+    if (!queryVector.length) return [];
+
+    const k = this.clampTopK(topK);
+    try {
+      const response = await this.es.search({
+        index: CHUNK_INDEX,
+        size: k,
+        knn: {
+          field: 'embedding',
+          query_vector: queryVector,
+          k,
+          num_candidates: Math.max(k * 10, 50),
+        },
+        _source: [
+          'chunk_id',
+          'document_id',
+          'document_title',
+          'content',
+          'heading',
+        ],
+      });
+      return this.mapHits(response.hits.hits);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`向量检索失败：${message}`);
+      return [];
+    }
+  }
+
+  /**
+   * 混合检索粗排：关键词 + 向量并行召回，再按 chunkId 做 RRF 融合。
+   * 嵌入失败或未传入时只走关键词。
+   */
+  async searchHybrid(params: {
+    query: string;
+    queryVector?: number[] | null;
+    hybridTopK?: number;
+    rrfC?: number;
+  }): Promise<ChunkHit[]> {
+    const hybridTopK = this.clampTopK(params.hybridTopK ?? 20);
+    const rrfC = params.rrfC && params.rrfC > 0 ? params.rrfC : 60;
+
+    const [keywordHits, vectorHits] = await Promise.all([
+      this.keywordSearch(params.query, hybridTopK),
+      params.queryVector?.length
+        ? this.knnSearch(params.queryVector, hybridTopK)
+        : Promise.resolve([] as ChunkHit[]),
+    ]);
+
+    const fused = this.rrfFuse(keywordHits, vectorHits, rrfC);
+    this.logger.log(
+      `混合检索 RRF：keyword=${keywordHits.length}, vector=${vectorHits.length}, fused=${fused.length}`,
+    );
+    return fused;
+  }
+
+  private clampTopK(topK: number): number {
+    return Math.min(Math.max(topK, 1), 50);
+  }
+
+  private mapHits(
+    hits: Array<{
+      _id?: string;
+      _score?: number | null;
+      _source?: unknown;
+    }>,
+  ): ChunkHit[] {
+    return hits.map((hit) => {
+      const src = (hit._source ?? {}) as Record<string, unknown>;
+      return {
+        chunkId: String(src.chunk_id ?? hit._id),
+        documentId: String(src.document_id ?? ''),
+        documentTitle: String(src.document_title ?? ''),
+        content: String(src.content ?? ''),
+        heading: (src.heading as string | null) ?? null,
+        score: hit._score ?? 0,
+      };
+    });
+  }
+
+  /**
+   * Reciprocal Rank Fusion：score(d) = Σ 1 / (C + rank_r(d))
+   * 两路各自按原始得分排序后再算排名。
+   */
+  private rrfFuse(
+    keywordHits: ChunkHit[],
+    vectorHits: ChunkHit[],
+    rrfC: number,
+  ): ChunkHit[] {
+    const fused = new Map<string, ChunkHit>();
+
+    const addChannel = (hits: ChunkHit[], channel: 'keyword' | 'vector') => {
+      const sorted = [...hits].sort((a, b) => b.score - a.score);
+      sorted.forEach((hit, rank) => {
+        const rrf = 1 / (rrfC + rank + 1);
+        const existing = fused.get(hit.chunkId);
+        if (!existing) {
+          fused.set(hit.chunkId, {
+            ...hit,
+            score: rrf,
+            bm25Score: channel === 'keyword' ? hit.score : 0,
+            vectorScore: channel === 'vector' ? hit.score : 0,
+          });
+          return;
+        }
+        existing.score += rrf;
+        if (channel === 'keyword') existing.bm25Score = hit.score;
+        if (channel === 'vector') existing.vectorScore = hit.score;
+      });
+    };
+
+    addChannel(keywordHits, 'keyword');
+    addChannel(vectorHits, 'vector');
+
+    return [...fused.values()].sort((a, b) => b.score - a.score);
+  }
+
+  /**
+   * 创建 kh_chunk 索引（dense_vector + IK）。
    * document_id 用 keyword：雪花 ID 以字符串传递，避免 JS long 精度问题。
    */
   private async createIndexIfNotExists() {
@@ -150,9 +316,15 @@ export class VectorIndexService implements OnModuleInit, OnModuleDestroy {
             document_id: { type: 'keyword' },
             document_title: {
               type: 'text',
+              analyzer: 'ik_max_word',
+              search_analyzer: 'ik_smart',
               fields: { keyword: { type: 'keyword' } },
             },
-            content: { type: 'text' },
+            content: {
+              type: 'text',
+              analyzer: 'ik_max_word',
+              search_analyzer: 'ik_smart',
+            },
             heading: { type: 'keyword' },
             chunk_index: { type: 'integer' },
             total_chunks: { type: 'integer' },

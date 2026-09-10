@@ -19,6 +19,7 @@ import { StorageModule } from './storage/storage.module';
 import { UserModule } from './user/user.module';
 import { SearchModule } from './search/search.module';
 import { GraphModule } from './graph/graph.module';
+import { AiModule } from './ai/ai.module';
 import { UserEntity } from './user/entities/user.entity';
 import { RoleEntity } from './user/entities/role.entity';
 import { UserRoleEntity } from './user/entities/user-role.entity';
@@ -69,6 +70,7 @@ import { UserPermissionEntity } from './user/entities/user-permission.entity';
     AuthModule,
     SearchModule,
     GraphModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],
