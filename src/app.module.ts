@@ -17,6 +17,8 @@ import { PipelineModule } from './pipeline/pipeline.module';
 import { RedisModule } from './redis/redis.module';
 import { StorageModule } from './storage/storage.module';
 import { UserModule } from './user/user.module';
+import { SearchModule } from './search/search.module';
+import { GraphModule } from './graph/graph.module';
 import { UserEntity } from './user/entities/user.entity';
 import { RoleEntity } from './user/entities/role.entity';
 import { UserRoleEntity } from './user/entities/user-role.entity';
@@ -65,6 +67,8 @@ import { UserPermissionEntity } from './user/entities/user-permission.entity';
     DocumentModule,
     UserModule,
     AuthModule,
+    SearchModule,
+    GraphModule,
   ],
   controllers: [AppController],
   providers: [AppService],
