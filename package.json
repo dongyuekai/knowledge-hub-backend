@@ -20,6 +20,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@ai-sdk/langchain": "^3.0.97",
     "@aws-sdk/client-s3": "^3.1127.0",
     "@elastic/elasticsearch": "^8.17.0",
     "@langchain/openai": "^1.5.11",
@@ -41,6 +42,7 @@
     "exceljs": "^4.4.0",
     "ioredis": "^5.11.1",
     "jszip": "^3.10.1",
+    "langchain": "^1.5.11",
     "mammoth": "^1.12.2",
     "mongoose": "^8.24.4",
     "multer": "^2.3.0",

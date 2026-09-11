@@ -7,11 +7,15 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { AiChatService } from './ai-chat.service';
+import { AiStreamService } from './ai-stream.service';
 import { HybridRetrievalService } from './hybrid-retrieval.service';
 import { ChatSessionService } from './chat-session.service';
 import { ChatDto } from './dto/chat.dto';
+import { ChatStreamDto } from './dto/chat-stream.dto';
 import { RagSearchDto } from './dto/rag-search.dto';
 import {
   CreateSessionDto,
@@ -27,6 +31,7 @@ import type { AuthUser } from '../auth/auth-user.interface';
 export class AiController {
   constructor(
     private readonly aiChat: AiChatService,
+    private readonly aiStream: AiStreamService,
     private readonly retrieval: HybridRetrievalService,
     private readonly sessions: ChatSessionService,
   ) {}
@@ -46,6 +51,17 @@ export class AiController {
   @RequirePermission(PermissionCode.search)
   chat(@Body() dto: ChatDto, @CurrentUser() user: AuthUser) {
     return this.aiChat.chat(dto.content, dto.topK ?? 5, user, dto.sessionId);
+  }
+
+  /** LangChain Agent 流式作答，经 @ai-sdk/langchain 转成 UI Message Stream */
+  @Post('ai/chat/stream')
+  @RequirePermission(PermissionCode.search)
+  streamChat(
+    @Body() dto: ChatStreamDto,
+    @CurrentUser() user: AuthUser,
+    @Res() res: Response,
+  ) {
+    return this.aiStream.streamChat(dto, user, res);
   }
 
   @Get('ai/sessions')

@@ -48,6 +48,15 @@ export class ChatSessionService {
     return this.em.save(session);
   }
 
+  /** 仍为默认标题时，用首问覆盖 */
+  async touchTitle(userId: string, id: string, question: string) {
+    const session = await this.getOwned(userId, id);
+    if (session.title === DEFAULT_TITLE) {
+      session.title = titleFromQuestion(question);
+    }
+    return this.em.save(session);
+  }
+
   async remove(userId: string, id: string) {
     await this.getOwned(userId, id);
     await this.em.delete(AiMessageEntity, { sessionId: id });
