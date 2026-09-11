@@ -14,6 +14,8 @@ export class HybridRetrievalService {
   private readonly logger = new Logger(HybridRetrievalService.name);
   private readonly hybridTopK: number;
   private readonly rrfC: number;
+  /** rerank relevance_score 下限（0–1）。 */
+  private readonly minScore: number;
 
   constructor(
     config: ConfigService,
@@ -23,6 +25,7 @@ export class HybridRetrievalService {
   ) {
     this.hybridTopK = Number(config.get('RAG_HYBRID_TOP_K', 20));
     this.rrfC = Number(config.get('RAG_RRF_C', 60));
+    this.minScore = Number(config.get('RAG_MIN_SCORE', 0.4));
   }
 
   async retrieve(query: string, topK = 5): Promise<ChunkHit[]> {
@@ -39,9 +42,18 @@ export class HybridRetrievalService {
       return [];
     }
 
-    const reranked = await this.reranker.rerank(query, fused, topK);
+    const reranked = await this.reranker.rerank(query, fused, fused.length);
     if (reranked?.length) {
-      return reranked.slice(0, topK);
+      const kept =
+        this.minScore > 0
+          ? reranked.filter((hit) => hit.score >= this.minScore)
+          : reranked;
+      const top = kept.slice(0, topK);
+      this.logger.log(
+        `检索过滤：rerank=${reranked.length}, minScore=${this.minScore}, ` +
+          `best=${reranked[0]?.score?.toFixed(3) ?? '-'}, kept=${kept.length}, return=${top.length}`,
+      );
+      return top;
     }
 
     return fused.slice(0, topK);
