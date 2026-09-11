@@ -10,6 +10,11 @@ import { Type } from 'class-transformer';
 
 /** RAG 对话请求 */
 export class ChatDto {
+  /** 已有会话；不传则新建 */
+  @IsOptional()
+  @IsString()
+  sessionId?: string;
+
   /** 用户问题 */
   @IsString()
   @IsNotEmpty()

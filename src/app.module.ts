@@ -26,6 +26,8 @@ import { UserRoleEntity } from './user/entities/user-role.entity';
 import { PermissionEntity } from './user/entities/permission.entity';
 import { RolePermissionEntity } from './user/entities/role-permission.entity';
 import { UserPermissionEntity } from './user/entities/user-permission.entity';
+import { AiSessionEntity } from './ai/entities/ai-session.entity';
+import { AiMessageEntity } from './ai/entities/ai-message.entity';
 
 @Module({
   imports: [
@@ -52,6 +54,8 @@ import { UserPermissionEntity } from './user/entities/user-permission.entity';
           PermissionEntity,
           RolePermissionEntity,
           UserPermissionEntity,
+          AiSessionEntity,
+          AiMessageEntity,
         ],
         synchronize: false,
       }),
