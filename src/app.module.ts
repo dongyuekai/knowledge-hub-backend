@@ -20,6 +20,7 @@ import { UserModule } from './user/user.module';
 import { SearchModule } from './search/search.module';
 import { GraphModule } from './graph/graph.module';
 import { AiModule } from './ai/ai.module';
+import { TeamModule } from './team/team.module';
 import { UserEntity } from './user/entities/user.entity';
 import { RoleEntity } from './user/entities/role.entity';
 import { UserRoleEntity } from './user/entities/user-role.entity';
@@ -28,6 +29,8 @@ import { RolePermissionEntity } from './user/entities/role-permission.entity';
 import { UserPermissionEntity } from './user/entities/user-permission.entity';
 import { AiSessionEntity } from './ai/entities/ai-session.entity';
 import { AiMessageEntity } from './ai/entities/ai-message.entity';
+import { TeamEntity } from './team/entities/team.entity';
+import { TeamMemberEntity } from './team/entities/team-member.entity';
 
 @Module({
   imports: [
@@ -56,6 +59,8 @@ import { AiMessageEntity } from './ai/entities/ai-message.entity';
           UserPermissionEntity,
           AiSessionEntity,
           AiMessageEntity,
+          TeamEntity,
+          TeamMemberEntity,
         ],
         synchronize: false,
       }),
@@ -71,6 +76,7 @@ import { AiMessageEntity } from './ai/entities/ai-message.entity';
     }),
     DocumentModule,
     UserModule,
+    TeamModule,
     AuthModule,
     SearchModule,
     GraphModule,

@@ -76,6 +76,26 @@ export class PipelineOrchestrator {
   }
 
   /**
+   * 已发布文档改公开/所属团队：只同步三套索引上的可见性字段，
+   * 不重跑 embedding / 抽实体。
+   */
+  async updateVisibility(doc: DocumentEntity) {
+    const vis = {
+      isPublic: doc.isPublic ?? false,
+      teamId: doc.teamId ?? null,
+      authorId: doc.authorId ?? null,
+    };
+    this.logger.log(
+      `同步可见性：documentId=${doc.id}, isPublic=${vis.isPublic}, teamId=${vis.teamId ?? '-'}`,
+    );
+    await Promise.all([
+      this.searchIndexService.updateVisibility(doc.id, vis),
+      this.vectorIndexService.updateVisibility(doc.id, vis),
+      this.graphBuildService.updateVisibility(doc.id, vis),
+    ]);
+  }
+
+  /**
    * 处理 Search 索引消息。
    * INDEX：按 documentId 从 Postgres + Mongo 拉全文，写入 ES kh_document。
    * DELETE：按 documentId 删除。
@@ -146,6 +166,7 @@ export class PipelineOrchestrator {
       categoryId: doc.categoryId,
       authorId: doc.authorId,
       teamId: doc.teamId,
+      isPublic: doc.isPublic,
       docStatus: doc.status,
       publishTime: this.toIsoDate(doc.publishTime),
     });
@@ -221,6 +242,7 @@ export class PipelineOrchestrator {
       likeCount: doc.likeCount,
       commentCount: doc.commentCount,
       authorId: doc.authorId ?? null,
+      teamId: doc.teamId ?? null,
       publishTime: this.toIsoDate(doc.publishTime),
       createdAt: this.toIsoDate(doc.createdAt),
       updatedAt: this.toIsoDate(doc.updatedAt),

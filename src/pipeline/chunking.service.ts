@@ -75,6 +75,7 @@ export class ChunkingService {
     categoryId?: string | null;
     authorId?: string | null;
     teamId?: string | null;
+    isPublic?: boolean;
     docStatus?: number | null;
     publishTime?: string | null;
   }): Promise<DocumentChunk[]> {
@@ -117,6 +118,7 @@ export class ChunkingService {
         categoryId: params.categoryId,
         authorId: params.authorId,
         teamId: params.teamId,
+        isPublic: params.isPublic,
         docStatus: params.docStatus,
         publishTime: params.publishTime,
       });

@@ -69,7 +69,7 @@ export class AiChatService {
       };
     }
 
-    const hits = await this.retrieval.retrieve(trimmed, topK);
+    const hits = await this.retrieval.retrieve(trimmed, topK, user);
     if (!hits.length) {
       const empty = {
         answer: '知识库里没有相关内容。',

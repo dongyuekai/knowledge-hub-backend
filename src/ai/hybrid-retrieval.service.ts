@@ -4,6 +4,8 @@ import { EmbeddingService } from '../pipeline/embedding.service';
 import { VectorIndexService } from '../pipeline/vector-index.service';
 import { ChunkHit } from '../pipeline/types/pipeline.types';
 import { RerankerService } from './reranker.service';
+import { accessFromUser } from '../document/document-access';
+import type { AuthUser } from '../auth/auth-user.interface';
 
 /**
  * kh_chunk 混合检索：
@@ -28,13 +30,21 @@ export class HybridRetrievalService {
     this.minScore = Number(config.get('RAG_MIN_SCORE', 0.4));
   }
 
-  async retrieve(query: string, topK = 5): Promise<ChunkHit[]> {
+  async retrieve(
+    query: string,
+    topK = 5,
+    user?: AuthUser,
+  ): Promise<ChunkHit[]> {
     const queryVector = await this.embedQuery(query);
+    const scope = user
+      ? accessFromUser(user)
+      : { unrestricted: false, userId: '', teamIds: [] };
     const fused = await this.vectorIndex.searchHybrid({
       query,
       queryVector,
       hybridTopK: this.hybridTopK,
       rrfC: this.rrfC,
+      scope,
     });
 
     if (!fused.length) {

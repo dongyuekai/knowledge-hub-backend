@@ -15,12 +15,13 @@ import { DocumentEntity } from '../document/entities/document.entity';
 import { UserEntity } from './entities/user.entity';
 import { RoleEntity } from './entities/role.entity';
 import { UserRoleEntity } from './entities/user-role.entity';
+import { PermissionService } from './permission.service';
+import { TeamService } from '../team/team.service';
 import { QueryUserDto } from './dto/query-user.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UpdateProfileDto } from './dto/profile.dto';
 import { UserVO } from './vo/user.vo';
-import { PermissionService } from './permission.service';
 
 @Injectable()
 export class UserService {
@@ -34,6 +35,7 @@ export class UserService {
     @InjectRepository(DocumentEntity)
     private readonly documentRepo: Repository<DocumentEntity>,
     private readonly permissionService: PermissionService,
+    private readonly teamService: TeamService,
   ) {}
 
   async findByEmail(email: string): Promise<UserEntity | null> {
@@ -83,11 +85,12 @@ export class UserService {
     };
   }
 
-  toAuthUser(
+  async toAuthUser(
     user: UserEntity,
     roles: string[],
     permissions: string[],
-  ): AuthUser {
+  ): Promise<AuthUser> {
+    const teamIds = await this.teamService.listAccessibleTeamIds(user.id);
     return {
       userId: user.id,
       username: user.username,
@@ -96,6 +99,7 @@ export class UserService {
       avatar: user.avatar,
       roles,
       permissions,
+      teamIds: teamIds.map(String),
     };
   }
 

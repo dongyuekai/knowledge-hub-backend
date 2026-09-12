@@ -13,6 +13,7 @@ import { PermissionEntity } from './entities/permission.entity';
 import { RolePermissionEntity } from './entities/role-permission.entity';
 import { UserPermissionEntity } from './entities/user-permission.entity';
 import { DocumentEntity } from '../document/entities/document.entity';
+import { TeamModule } from '../team/team.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { DocumentEntity } from '../document/entities/document.entity';
       UserPermissionEntity,
       DocumentEntity,
     ]),
+    TeamModule,
   ],
   controllers: [UserController, RoleController, PermissionController],
   providers: [UserService, RoleService, PermissionService],

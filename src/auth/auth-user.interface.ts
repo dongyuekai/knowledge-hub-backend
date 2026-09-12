@@ -7,4 +7,6 @@ export interface AuthUser {
   avatar?: string | null;
   roles: string[];
   permissions: string[];
+  // 所在团队（含担任负责人的团队）用于文档可见性
+  teamIds: string[];
 }

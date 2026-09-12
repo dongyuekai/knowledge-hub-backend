@@ -9,6 +9,11 @@ import neo4j, { Driver, Session } from 'neo4j-driver';
 import { ChunkingService } from './chunking.service';
 import { ExtractionService } from './extraction.service';
 import { PipelineDocument } from './types/pipeline.types';
+import {
+  neo4jAccessParams,
+  neo4jDocumentAccessWhere,
+  type DocumentAccessScope,
+} from '../document/document-access';
 
 /**
  * KG 知识图谱构建
@@ -94,7 +99,8 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
         MERGE (d:KnowledgeDocument {id: $id})
         // 每次重建都刷新可变元数据；createdAt 仅首次写入
         SET d.title = $title, d.summary = $summary, d.categoryId = $categoryId,
-            d.authorId = $authorId, d.status = $status, d.tags = $tags,
+            d.authorId = $authorId, d.teamId = $teamId, d.isPublic = $isPublic,
+            d.status = $status, d.tags = $tags,
             d.updatedAt = $now, d.createdAt = coalesce(d.createdAt, $now)
         `,
         {
@@ -103,6 +109,8 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
           summary: doc.summary ?? '',
           categoryId: doc.categoryId ?? null,
           authorId: doc.authorId ?? null,
+          teamId: doc.teamId ?? null,
+          isPublic: doc.isPublic ?? false,
           status: doc.status,
           tags: doc.tags ?? '',
           now,
@@ -117,6 +125,7 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
         categoryId: doc.categoryId,
         authorId: doc.authorId,
         teamId: doc.teamId,
+        isPublic: doc.isPublic,
         docStatus: doc.status,
         publishTime:
           doc.publishTime instanceof Date
@@ -199,6 +208,44 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** 已发布文档只改公开/团队时，只刷文档节点属性，不必抽实体重建 */
+  async updateVisibility(
+    documentId: string,
+    vis: { isPublic: boolean; teamId: string | null; authorId: string | null },
+  ) {
+    if (!this.driver) {
+      this.logger.warn(
+        `跳过图谱可见性更新（Neo4j 不可用）：documentId=${documentId}`,
+      );
+      return;
+    }
+    const session = this.driver.session();
+    try {
+      await session.run(
+        `
+        MATCH (d:KnowledgeDocument {id: $id})
+        SET d.isPublic = $isPublic, d.teamId = $teamId, d.authorId = $authorId,
+            d.updatedAt = $now
+        `,
+        {
+          id: documentId,
+          isPublic: vis.isPublic,
+          teamId: vis.teamId,
+          authorId: vis.authorId,
+          now: new Date().toISOString(),
+        },
+      );
+      this.logger.log(`图谱可见性已更新：documentId=${documentId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `图谱可见性更新失败：documentId=${documentId}, ${message}`,
+      );
+    } finally {
+      await session.close();
+    }
+  }
+
   /**
    * 删除文档及其 chunk；再清理「已无人提及」的孤儿实体，避免图膨胀。
    */
@@ -238,7 +285,7 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
   /**
    * 查询实体节点。Neo4j 不可用时返回 []。
    */
-  async listNodes(type?: string, limit = 200) {
+  async listNodes(type?: string, limit = 200, scope?: DocumentAccessScope) {
     if (!this.driver) {
       this.logger.warn('跳过图谱节点查询（Neo4j 不可用）');
       return [];
@@ -249,12 +296,22 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       const result = await session.run(
         `
         MATCH (e:KnowledgeEntity)
-        WHERE $type IS NULL OR $type = '' OR e.type = $type
-        RETURN e.name AS id, e.name AS name, e.type AS type,
+        WHERE ($type IS NULL OR $type = '' OR e.type = $type)
+          AND (
+            $unrestricted OR EXISTS {
+              MATCH (d:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(e)
+              WHERE ${neo4jDocumentAccessWhere('d')}
+            }
+          )
+        RETURN DISTINCT e.name AS id, e.name AS name, e.type AS type,
                e.description AS description
         LIMIT $limit
         `,
-        { type: type ?? null, limit: neo4j.int(cap) },
+        {
+          type: type ?? null,
+          limit: neo4j.int(cap),
+          ...neo4jAccessParams(scope),
+        },
       );
       return result.records.map((record) => ({
         id: record.get('id') as string,
@@ -274,7 +331,7 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
   /**
    * 查询实体间 RELATED_TO 边。Neo4j 不可用时返回 []。
    */
-  async listEdges(limit = 500) {
+  async listEdges(limit = 500, scope?: DocumentAccessScope) {
     if (!this.driver) {
       this.logger.warn('跳过图谱边查询（Neo4j 不可用）');
       return [];
@@ -285,11 +342,21 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       const result = await session.run(
         `
         MATCH (a:KnowledgeEntity)-[r:RELATED_TO]->(b:KnowledgeEntity)
+        WHERE $unrestricted OR (
+          EXISTS {
+            MATCH (d1:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(a)
+            WHERE ${neo4jDocumentAccessWhere('d1')}
+          }
+          AND EXISTS {
+            MATCH (d2:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(b)
+            WHERE ${neo4jDocumentAccessWhere('d2')}
+          }
+        )
         RETURN a.name AS source, b.name AS target,
                r.relation AS relation, r.weight AS weight
         LIMIT $limit
         `,
-        { limit: neo4j.int(cap) },
+        { limit: neo4j.int(cap), ...neo4jAccessParams(scope) },
       );
       return result.records.map((record) => ({
         source: record.get('source') as string,
@@ -310,7 +377,7 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
    * 图谱关键词检索：匹配实体名/描述、文档标题/摘要、块标题/正文。
    * Neo4j 不可用或关键词为空时返回 []。
    */
-  async searchGraph(keyword: string, limit = 50) {
+  async searchGraph(keyword: string, limit = 50, scope?: DocumentAccessScope) {
     if (!this.driver) {
       this.logger.warn('跳过图谱检索（Neo4j 不可用）');
       return [];
@@ -324,12 +391,26 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       const result = await session.run(
         `
         MATCH (n)
-        WHERE toLower(coalesce(n.name, '')) CONTAINS toLower($kw)
-           OR toLower(coalesce(n.title, '')) CONTAINS toLower($kw)
-           OR toLower(coalesce(n.heading, '')) CONTAINS toLower($kw)
-           OR toLower(coalesce(n.description, '')) CONTAINS toLower($kw)
-           OR toLower(coalesce(n.summary, '')) CONTAINS toLower($kw)
-           OR toLower(coalesce(n.content, '')) CONTAINS toLower($kw)
+        WHERE (
+             toLower(coalesce(n.name, '')) CONTAINS toLower($kw)
+          OR toLower(coalesce(n.title, '')) CONTAINS toLower($kw)
+          OR toLower(coalesce(n.heading, '')) CONTAINS toLower($kw)
+          OR toLower(coalesce(n.description, '')) CONTAINS toLower($kw)
+          OR toLower(coalesce(n.summary, '')) CONTAINS toLower($kw)
+          OR toLower(coalesce(n.content, '')) CONTAINS toLower($kw)
+        )
+        AND (
+          $unrestricted
+          OR (n:KnowledgeDocument AND ${neo4jDocumentAccessWhere('n')})
+          OR (n:DocumentChunk AND EXISTS {
+            MATCH (d:KnowledgeDocument)-[:HAS_CHUNK]->(n)
+            WHERE ${neo4jDocumentAccessWhere('d')}
+          })
+          OR (n:KnowledgeEntity AND EXISTS {
+            MATCH (d:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(n)
+            WHERE ${neo4jDocumentAccessWhere('d')}
+          })
+        )
         RETURN labels(n)[0] AS label,
                coalesce(n.name, n.title, n.heading, n.id, n.chunkId) AS name,
                coalesce(n.id, n.chunkId, n.name) AS id,
@@ -346,7 +427,7 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
         ORDER BY label, name
         LIMIT $limit
         `,
-        { kw, limit: neo4j.int(cap) },
+        { kw, limit: neo4j.int(cap), ...neo4jAccessParams(scope) },
       );
       return result.records.map((record) => ({
         id: record.get('id') as string,
@@ -379,6 +460,7 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
     from?: string;
     to?: string;
     docLimit?: number;
+    scope?: DocumentAccessScope;
   }) {
     const empty = {
       nodes: [] as Array<{
@@ -430,21 +512,36 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
     const from = params.from?.trim() || null;
     const to = params.to?.trim() || null;
     const docLimit = Math.min(Math.max(params.docLimit ?? 24, 1), 80);
+    const vis = neo4jAccessParams(params.scope);
     const session = this.driver.session();
 
     try {
-      // 全库统计：文档数、实体数、RELATED_TO 边数、MENTIONS 提及次数（分段 WITH 避免笛卡尔积）
+      // 全库统计：仅统计当前用户可见文档及其提及
       const statsResult = await session.run(
         `
         OPTIONAL MATCH (d:KnowledgeDocument)
+        WHERE ${neo4jDocumentAccessWhere('d')}
         WITH count(d) AS documentCount
-        OPTIONAL MATCH (e:KnowledgeEntity)
-        WITH documentCount, count(e) AS entityCount
-        OPTIONAL MATCH ()-[rel:RELATED_TO]->()
+        OPTIONAL MATCH (d2:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(e:KnowledgeEntity)
+        WHERE ${neo4jDocumentAccessWhere('d2')}
+        WITH documentCount, count(DISTINCT e) AS entityCount
+        OPTIONAL MATCH (a:KnowledgeEntity)-[rel:RELATED_TO]->(b:KnowledgeEntity)
+        WHERE $unrestricted OR (
+          EXISTS {
+            MATCH (d3:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(a)
+            WHERE ${neo4jDocumentAccessWhere('d3')}
+          }
+          AND EXISTS {
+            MATCH (d4:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(b)
+            WHERE ${neo4jDocumentAccessWhere('d4')}
+          }
+        )
         WITH documentCount, entityCount, count(rel) AS relatedCount
-        OPTIONAL MATCH (:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(e0:KnowledgeEntity)
+        OPTIONAL MATCH (d5:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(e0:KnowledgeEntity)
+        WHERE ${neo4jDocumentAccessWhere('d5')}
         RETURN documentCount, entityCount, relatedCount, count(e0) AS mentionCount
         `,
+        vis,
       );
       const statsRow = statsResult.records[0];
       const documentCount = this.toNumber(statsRow?.get('documentCount'), 0);
@@ -455,11 +552,13 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       // 按实体 type 分组计数，供前端筛选
       const typeRows = await session.run(
         `
-        MATCH (e:KnowledgeEntity)
-        WHERE e.type IS NOT NULL AND e.type <> ''
-        RETURN e.type AS type, count(*) AS count
+        MATCH (d:KnowledgeDocument)-[:HAS_CHUNK]->(:DocumentChunk)-[:MENTIONS]->(e:KnowledgeEntity)
+        WHERE ${neo4jDocumentAccessWhere('d')}
+          AND e.type IS NOT NULL AND e.type <> ''
+        RETURN e.type AS type, count(DISTINCT e) AS count
         ORDER BY count DESC
         `,
+        vis,
       );
       const entityTypes = typeRows.records.map((record) => ({
         type: String(record.get('type')),
@@ -469,11 +568,13 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       // 被文档块 MENTIONS 最多的 5 个实体（degree = 提及次数）
       const topRows = await session.run(
         `
-        MATCH (e:KnowledgeEntity)<-[:MENTIONS]-(:DocumentChunk)
+        MATCH (e:KnowledgeEntity)<-[:MENTIONS]-(:DocumentChunk)<-[:HAS_CHUNK]-(d:KnowledgeDocument)
+        WHERE ${neo4jDocumentAccessWhere('d')}
         RETURN e.name AS name, e.type AS type, count(*) AS degree
         ORDER BY degree DESC
         LIMIT 5
         `,
+        vis,
       );
       const topEntities = topRows.records.map((record) => ({
         name: String(record.get('name')),
@@ -485,10 +586,12 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       const recentRows = await session.run(
         `
         MATCH (d:KnowledgeDocument)
+        WHERE ${neo4jDocumentAccessWhere('d')}
         RETURN d.id AS id, d.title AS name, d.updatedAt AS updatedAt
         ORDER BY d.updatedAt DESC
         LIMIT 8
         `,
+        vis,
       );
       const recentNodes = recentRows.records.map((record) => ({
         id: `doc:${record.get('id') as string}`,
@@ -501,7 +604,8 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
       const docRows = await session.run(
         `
         MATCH (d:KnowledgeDocument)
-        WHERE ($kw = '' OR toLower(coalesce(d.title, '')) CONTAINS toLower($kw)
+        WHERE ${neo4jDocumentAccessWhere('d')}
+          AND ($kw = '' OR toLower(coalesce(d.title, '')) CONTAINS toLower($kw)
               OR toLower(coalesce(d.summary, '')) CONTAINS toLower($kw)
               OR toLower(coalesce(d.tags, '')) CONTAINS toLower($kw))
           AND ($from IS NULL OR d.updatedAt >= $from)
@@ -521,6 +625,7 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
           from,
           to,
           docLimit: neo4j.int(docLimit),
+          ...vis,
         },
       );
 
@@ -531,8 +636,9 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
         const extra = await session.run(
           `
           MATCH (e:KnowledgeEntity)<-[:MENTIONS]-(:DocumentChunk)<-[:HAS_CHUNK]-(d:KnowledgeDocument)
-          WHERE toLower(coalesce(e.name, '')) CONTAINS toLower($kw)
-             OR toLower(coalesce(e.description, '')) CONTAINS toLower($kw)
+          WHERE ${neo4jDocumentAccessWhere('d')}
+            AND (toLower(coalesce(e.name, '')) CONTAINS toLower($kw)
+             OR toLower(coalesce(e.description, '')) CONTAINS toLower($kw))
           WITH DISTINCT d
           WHERE ($from IS NULL OR d.updatedAt >= $from)
             AND ($to IS NULL OR d.updatedAt <= $to)
@@ -545,7 +651,14 @@ export class GraphBuildService implements OnModuleInit, OnModuleDestroy {
                  } END) AS entities
           LIMIT $docLimit
           `,
-          { kw, entityType, from, to, docLimit: neo4j.int(docLimit) },
+          {
+            kw,
+            entityType,
+            from,
+            to,
+            docLimit: neo4j.int(docLimit),
+            ...vis,
+          },
         );
         const seen = new Set(docRecords.map((r) => String(r.get('docId'))));
         for (const record of extra.records) {

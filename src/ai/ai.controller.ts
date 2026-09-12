@@ -42,8 +42,8 @@ export class AiController {
    */
   @Post('rag/search')
   @RequirePermission(PermissionCode.search)
-  search(@Body() dto: RagSearchDto) {
-    return this.retrieval.retrieve(dto.query.trim(), dto.topK ?? 5);
+  search(@Body() dto: RagSearchDto, @CurrentUser() user: AuthUser) {
+    return this.retrieval.retrieve(dto.query.trim(), dto.topK ?? 5, user);
   }
 
   /** RAG 对话：混合检索后再作答；写入本人会话 */

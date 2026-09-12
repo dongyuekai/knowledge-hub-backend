@@ -84,7 +84,7 @@ export class AiStreamService {
       useResponsesApi: false,
       streamUsage: false,
       configuration: { baseURL },
-      modelKwargs: enableThinking ? { enable_thinking: true } : undefined, // 开启思考模式
+      modelKwargs: enableThinking ? { enable_thinking: true } : undefined,
     });
 
     const search = this.webSearch;
@@ -160,7 +160,7 @@ export class AiStreamService {
 
         let hits: ChunkHit[] = [];
         try {
-          hits = await this.retrieval.retrieve(question, topK);
+          hits = await this.retrieval.retrieve(question, topK, user);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           this.logger.warn(`RAG 检索失败：${detail}`);
