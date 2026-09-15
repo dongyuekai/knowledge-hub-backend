@@ -6,25 +6,12 @@ import { z } from 'zod';
 import { MemoryClient } from 'mem0ai';
 
 const memorySchema = z.object({
-  write_user: z
-    .boolean()
-    .describe(
-      '写入用户层：换会话仍应保留的身份、岗位、回答偏好、长期约束。不含本轮任务、不含知识库条文。',
-    ),
-  write_session: z
-    .boolean()
-    .describe('写入会话层：仅当前会话的任务、进度、待办、临时约定。'),
-  reason: z.string().describe('分类理由，一句话'),
+  write_user: z.boolean(),
+  write_session: z.boolean(),
+  reason: z.string(),
 });
 
 type MemoryClassified = z.infer<typeof memorySchema>;
-
-/** 模型偶发返回 [{...}]，拆成对象再校验 */
-function parseMemoryClassification(raw: unknown): MemoryClassified {
-  const value =
-    Array.isArray(raw) && raw.length > 0 ? raw[0] : raw;
-  return memorySchema.parse(value);
-}
 
 const CLASSIFIER_PROMPT =
   '你是企业知识库助手的记忆分类器。判断本轮是否有「新事实」要写入 Mem0。\n' +
@@ -48,7 +35,23 @@ const CLASSIFIER_PROMPT =
   '1. 知识库内容永远不要写成 user 记忆\n' +
   '2. 「这次先看差旅制度第三节」→ session，不要标成 user\n' +
   '3. user 与 session 可同时为 true\n' +
-  '4. 一次性提问且未产生需跨轮记住的约定 → 均为 false';
+  '4. 一次性提问且未产生需跨轮记住的约定 → 均为 false\n' +
+  '\n' +
+  '只输出一个 JSON 对象（不要数组），字段：write_user、write_session、reason。';
+
+/** 模型偶发返回 [{...}]，拆开再校验 */
+function parseMemoryClassification(raw: unknown): MemoryClassified {
+  const value = Array.isArray(raw) && raw.length > 0 ? raw[0] : raw;
+  return memorySchema.parse(value);
+}
+
+function extractJson(text: string): unknown {
+  const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+  if (!match) {
+    throw new Error(`分类结果不是 JSON：${text.slice(0, 120)}`);
+  }
+  return JSON.parse(match[0]);
+}
 
 export type LongMemoryHits = {
   user: string[];
@@ -63,10 +66,7 @@ export type LongMemoryHits = {
 export class ChatLongMemoryService {
   private readonly logger = new Logger(ChatLongMemoryService.name);
   private readonly client?: MemoryClient;
-  private readonly llm?: ChatOpenAI;
-  private readonly classifier?: {
-    invoke: (messages: unknown[]) => Promise<unknown>;
-  };
+  private readonly classifierLlm?: ChatOpenAI;
   private readonly topK: number;
 
   constructor(config: ConfigService) {
@@ -98,7 +98,7 @@ export class ChatLongMemoryService {
       config.get<string>('LLM_MODEL') ||
       'qwen-plus';
 
-    this.llm = new ChatOpenAI({
+    this.classifierLlm = new ChatOpenAI({
       apiKey,
       model: modelName,
       temperature: 0,
@@ -106,10 +106,8 @@ export class ChatLongMemoryService {
       maxRetries: 0,
       useResponsesApi: false,
       configuration: { baseURL },
+      modelKwargs: { response_format: { type: 'json_object' } },
     });
-    this.classifier = this.llm.withStructuredOutput(memorySchema, {
-      method: 'jsonMode',
-    }) as ChatLongMemoryService['classifier'];
   }
 
   get enabled() {
@@ -176,7 +174,7 @@ export class ChatLongMemoryService {
     question: string,
     answer: string,
   ): Promise<void> {
-    if (!this.client || !this.classifier) return;
+    if (!this.client || !this.classifierLlm) return;
     const extractFrom = [{ role: 'user' as const, content: question }];
 
     let classified: MemoryClassified;
@@ -225,30 +223,17 @@ export class ChatLongMemoryService {
     question: string,
     answer: string,
   ): Promise<MemoryClassified> {
-    const messages = [
-      new SystemMessage(
-        `${CLASSIFIER_PROMPT}\n\n只输出一个 JSON 对象，不要数组，字段为 write_user、write_session、reason。`,
-      ),
+    const response = await this.classifierLlm!.invoke([
+      new SystemMessage(CLASSIFIER_PROMPT),
       new HumanMessage(
         `用户：${question}\n助手（仅供判断，不要当作用户事实）：${answer.slice(0, 300)}`,
       ),
-    ];
-
-    try {
-      const raw = await this.classifier!.invoke(messages);
-      return parseMemoryClassification(raw);
-    } catch (firstError) {
-      if (!this.llm) throw firstError;
-      // jsonMode / 结构化偶发返回数组时，降级抽 JSON 再校验
-      const response = await this.llm.invoke(messages);
-      const text =
-        typeof response.content === 'string'
-          ? response.content
-          : JSON.stringify(response.content);
-      const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-      if (!match) throw firstError;
-      return parseMemoryClassification(JSON.parse(match[0]));
-    }
+    ]);
+    const text =
+      typeof response.content === 'string'
+        ? response.content
+        : JSON.stringify(response.content);
+    return parseMemoryClassification(extractJson(text));
   }
 
   async clearSession(userId: string, sessionId: string): Promise<void> {
