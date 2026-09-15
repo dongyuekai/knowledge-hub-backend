@@ -7,13 +7,22 @@ import {
 } from 'ai';
 import { toUIMessageStream } from '@ai-sdk/langchain';
 import { ChatOpenAI } from '@langchain/openai';
-import { HumanMessage } from '@langchain/core/messages';
-import { createAgent, modelCallLimitMiddleware, tool } from 'langchain';
+import { HumanMessage, type BaseMessage } from '@langchain/core/messages';
+import {
+  createAgent,
+  modelCallLimitMiddleware,
+  summarizationMiddleware,
+  tool,
+} from 'langchain';
 import { z } from 'zod';
 import type { Response } from 'express';
 import { HybridRetrievalService } from './hybrid-retrieval.service';
 import { ChatSessionService } from './chat-session.service';
+import { ChatShortMemoryService } from './chat-short-memory.service';
+import { ChatLongMemoryService } from './chat-long-memory.service';
+import { ChatQueryRewriteService } from './chat-query-rewrite.service';
 import { WebSearchService } from './web-search.service';
+import { dbRowsToMessages } from './chat-memory.util';
 import type { AuthUser } from '../auth/auth-user.interface';
 import type { ChatSource } from './chat.types';
 import type { ChatStreamDto } from './dto/chat-stream.dto';
@@ -23,9 +32,12 @@ const EXCERPT_LEN = 200;
 
 const SYSTEM =
   '你是企业知识库助手。优先根据「检索到的资料」回答。' +
+  '结合对话历史和记忆里的用户背景，但制度/流程以本轮资料为准，不要用记忆替代文档。' +
+  '没有检索资料且是寒暄时，直接回应，不必调用 web_search。' +
   '资料不足、需要时效性或外部公开信息时，调用 web_search。' +
   '依据资料的陈述句末标 [n]，与资料编号一致。' +
-  '联网结果用标题+链接说明，不要编造。资料不够就明确说不知道。';
+  '联网结果用标题+链接说明，不要编造。资料不够就明确说不知道。' +
+  '思考过程与最终回答一律使用简体中文，不要用英文思考。';
 
 type KhUIMessage = UIMessage<
   unknown,
@@ -56,6 +68,9 @@ export class AiStreamService {
     private readonly retrieval: HybridRetrievalService,
     private readonly sessions: ChatSessionService,
     private readonly webSearch: WebSearchService,
+    private readonly shortMemory: ChatShortMemoryService,
+    private readonly longMemory: ChatLongMemoryService,
+    private readonly queryRewrite: ChatQueryRewriteService,
   ) {
     const apiKey =
       config.get<string>('OPENAI_API_KEY') ||
@@ -86,6 +101,16 @@ export class AiStreamService {
       configuration: { baseURL },
       modelKwargs: enableThinking ? { enable_thinking: true } : undefined,
     });
+    // 摘要/分类不要开思考，结构化输出更容易稳
+    const compactLlm = new ChatOpenAI({
+      apiKey,
+      model: modelName,
+      temperature: 0,
+      timeout: Number(config.get('AI_CHAT_TIMEOUT_MS', 60000)),
+      maxRetries: 0,
+      useResponsesApi: false,
+      configuration: { baseURL },
+    });
 
     const search = this.webSearch;
     this.agent = createAgent({
@@ -113,6 +138,13 @@ export class AiStreamService {
       ],
       systemPrompt: SYSTEM,
       middleware: [
+        summarizationMiddleware({
+          model: compactLlm,
+          trigger: { messages: 12 },
+          keep: { messages: 6 },
+          summaryPrompt:
+            '用中文简洁总结对话：话题、已确认结论、待办。不要写入知识库条文。\n\n待摘要的对话：\n{messages}\n\n摘要：',
+        }),
         // 单次 invoke 最多调 4 次模型，避免 web_search 循环打爆；超限正常结束而非抛错
         modelCallLimitMiddleware({ runLimit: 4, exitBehavior: 'end' }),
       ],
@@ -124,6 +156,7 @@ export class AiStreamService {
     const topK = dto.topK ?? 5;
     let persistSessionId = dto.sessionId;
     let persistSources: ChatSource[] = [];
+    let persistHistory: BaseMessage[] = [];
 
     // SDK 只提供 UI Message 协议；会话、RAG、data-* 和 Agent 流要在 execute 里自己编排
     const stream = createUIMessageStream<KhUIMessage>({
@@ -153,25 +186,42 @@ export class AiStreamService {
           data: { sessionId: session.id },
         });
 
-        writer.write({
-          type: 'data-status',
-          data: { stage: 'retrieve', text: '正在检索知识库…' },
-        });
+        const history = await this.loadWorkingHistory(user.userId, session.id);
+        persistHistory = history;
 
-        let hits: ChunkHit[] = [];
-        try {
-          hits = await this.retrieval.retrieve(question, topK, user);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          this.logger.warn(`RAG 检索失败：${detail}`);
+        if (history.length) {
+          writer.write({
+            type: 'data-status',
+            data: { stage: 'rewrite', text: '正在理解问题…' },
+          });
         }
+        const plan = await this.queryRewrite.rewrite(question, history);
+
+        if (plan.needRetrieve) {
+          writer.write({
+            type: 'data-status',
+            data: { stage: 'retrieve', text: '正在检索知识库…' },
+          });
+        }
+
+        const [hits, memHits] = await Promise.all([
+          plan.needRetrieve
+            ? this.retrieval.retrieve(plan.query, topK, user).catch((error) => {
+                const detail =
+                  error instanceof Error ? error.message : String(error);
+                this.logger.warn(`RAG 检索失败：${detail}`);
+                return [] as ChunkHit[];
+              })
+            : Promise.resolve([] as ChunkHit[]),
+          this.longMemory.search(user.userId, session.id, plan.query),
+        ]);
 
         const sources = this.toSources(hits);
         persistSources = sources;
         writer.write({
           type: 'data-retrieve',
           data: {
-            query: question,
+            query: plan.query,
             items: sources.map((src) => ({
               index: src.index,
               documentId: src.documentId,
@@ -201,10 +251,19 @@ export class AiStreamService {
 
         const prompt = hits.length
           ? `检索到的资料：\n${this.buildContext(hits)}\n\n用户问题：${question}`
-          : `知识库没有召回到相关内容。\n\n用户问题：${question}`;
+          : plan.needRetrieve
+            ? `知识库没有召回到相关内容。\n\n用户问题：${question}`
+            : `用户问题：${question}`;
 
+        const memoryMsg = this.longMemory.buildSystemMessage(memHits);
         const langchainStream = await this.agent.stream(
-          { messages: [new HumanMessage(prompt)] },
+          {
+            messages: [
+              ...(memoryMsg ? [memoryMsg] : []),
+              ...history,
+              new HumanMessage(prompt),
+            ],
+          },
           // messages：模型 token/思考；tools：web_search 调用，给适配包转成 tool-* 事件
           { streamMode: ['messages', 'tools'] },
         );
@@ -234,25 +293,57 @@ export class AiStreamService {
           ? persistSources.filter((s) => used.has(s.index))
           : [];
         if (!question || !persistSessionId) return;
+        const finalAnswer = answer || '未能生成回答。';
         try {
           await this.sessions.appendTurn(
             user.userId,
             persistSessionId,
             question,
-            answer || '未能生成回答。',
+            finalAnswer,
             sources,
+          );
+          await this.shortMemory.appendTurn(
+            user.userId,
+            persistSessionId,
+            persistHistory,
+            question,
+            finalAnswer,
           );
         } catch (error) {
           this.logger.warn(
             `流式对话落库失败：${error instanceof Error ? error.message : error}`,
           );
         }
+        this.longMemory.rememberTurn(
+          user.userId,
+          persistSessionId,
+          question,
+          finalAnswer,
+        );
       },
       onError: (error) =>
         error instanceof Error ? error.message : String(error),
     });
 
     await pipeUIMessageStreamToResponse({ response: res, stream });
+  }
+
+  private async loadWorkingHistory(userId: string, sessionId: string) {
+    const cached = await this.shortMemory.tryLoad(userId, sessionId);
+    if (cached) return cached;
+    const rows = await this.sessions.listRecentMessages(
+      userId,
+      sessionId,
+      this.shortMemory.windowSize,
+    );
+    const history = dbRowsToMessages(rows);
+    if (history.length) {
+      await this.shortMemory.save(userId, sessionId, history);
+      this.logger.log(
+        `短期记忆从库回填：sessionId=${sessionId}, n=${history.length}`,
+      );
+    }
+    return history;
   }
 
   private toSources(hits: ChunkHit[]): ChatSource[] {
