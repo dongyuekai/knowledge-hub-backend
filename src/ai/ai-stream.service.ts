@@ -423,7 +423,7 @@ export class AiStreamService {
             },
           }) as never,
         );
-      };,
+      },
       onFinish: async ({ responseMessage }) => {
         const parts = responseMessage?.parts ?? [];
         const answer = parts
