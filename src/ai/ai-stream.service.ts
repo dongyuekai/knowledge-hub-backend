@@ -131,6 +131,7 @@ export class AiStreamService {
       maxRetries: 0,
       useResponsesApi: false,
       configuration: { baseURL },
+      modelKwargs: { enable_thinking: false },
     });
   }
 

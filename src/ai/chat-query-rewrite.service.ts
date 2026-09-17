@@ -9,6 +9,7 @@ import {
 import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons';
 import { z } from 'zod';
 import { compactRewriteContext } from './chat-memory.util';
+import { objectOrFirstItem } from './structured-output.util';
 import type { ChunkHit } from '../pipeline/types/pipeline.types';
 
 /**
@@ -116,6 +117,7 @@ const GRADE_PROMPT =
   '- 切题：同一主题、同一制度/岗位/流程，能支撑作答（不必覆盖每个细节）\n' +
   '- 不切题：只是词沾边（如问加班餐补却命中差旅报销）、或完全另一件事\n' +
   '- 只根据给定标题和摘录判断，不要假设库里还有别的文档\n' +
+  '- 输出单个 JSON 对象，不要用数组包裹\n' +
   '- 输出不要解释字段以外的内容';
 
 /** 不足时换一种问法再查知识库 */
@@ -126,7 +128,8 @@ const RETRY_REWRITE_PROMPT =
   '- 不要重复上次检索词\n' +
   '- 可换同义、补全制度/岗位/补贴类型等核心实体\n' +
   '- 不要编造条款号、专有名词\n' +
-  '- 一句中文，尽量不超过 40 字';
+  '- 一句中文，尽量不超过 40 字\n' +
+  '- 输出单个 JSON 对象，不要用数组包裹';
 
 /** 本轮意图 + 建议检索词（进 Agent 前只跑一次） */
 const ROUTE_PROMPT =
@@ -149,6 +152,7 @@ const ROUTE_PROMPT =
   '- 不要编造上文没有的专有名词、条款号\n' +
   '- 不要复述助手已给出的制度条文\n' +
   '- 闲聊/偏好：用原问题即可\n' +
+  '- 输出单个 JSON 对象，不要用数组包裹\n' +
   '- 输出不要解释';
 
 /**
@@ -192,20 +196,22 @@ export class ChatQueryRewriteService {
       apiKey,
       model: modelName,
       temperature: 0,
-      timeout: Number(config.get('AI_QUERY_REWRITE_TIMEOUT_MS', 15000)),
+      timeout: Number(config.get('AI_QUERY_REWRITE_TIMEOUT_MS', 30000)),
       maxRetries: 0,
       streaming: false,
       useResponsesApi: false,
       configuration: { baseURL },
+      // qwen3.8 默认会思考；分类/评估必须关掉，否则 15s 内经常 Request timed out
+      modelKwargs: { enable_thinking: false },
     });
     this.router = llm.withStructuredOutput(
-      routeSchema,
+      objectOrFirstItem(routeSchema),
     ) as ChatQueryRewriteService['router'];
     this.grader = llm.withStructuredOutput(
-      gradeSchema,
+      objectOrFirstItem(gradeSchema),
     ) as ChatQueryRewriteService['grader'];
     this.retryWriter = llm.withStructuredOutput(
-      retryRewriteSchema,
+      objectOrFirstItem(retryRewriteSchema),
     ) as ChatQueryRewriteService['retryWriter'];
   }
 
@@ -219,6 +225,7 @@ export class ChatQueryRewriteService {
     if (!this.router) return fallback;
 
     const context = compactRewriteContext(history);
+    const started = Date.now();
     try {
       const result = await invokeIsolated(() =>
         this.router!.invoke([
@@ -232,11 +239,13 @@ export class ChatQueryRewriteService {
       );
       const query = result.standalone_query.trim() || question;
       const plan = this.toPlan(result.intent, query);
-      this.logger.log(`意图：${plan.intent} query=${plan.query.slice(0, 80)}`);
+      this.logger.log(
+        `意图：${plan.intent} ${Date.now() - started}ms query=${plan.query.slice(0, 80)}`,
+      );
       return plan;
     } catch (error) {
       this.logger.warn(
-        `意图识别失败，按知识库处理：${error instanceof Error ? error.message : error}`,
+        `意图识别失败，按知识库处理（${Date.now() - started}ms）：${error instanceof Error ? error.message : error}`,
       );
       return fallback;
     }

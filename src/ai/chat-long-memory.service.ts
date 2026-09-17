@@ -106,7 +106,10 @@ export class ChatLongMemoryService {
       maxRetries: 0,
       useResponsesApi: false,
       configuration: { baseURL },
-      modelKwargs: { response_format: { type: 'json_object' } },
+      modelKwargs: {
+        enable_thinking: false,
+        response_format: { type: 'json_object' },
+      },
     });
   }
 
